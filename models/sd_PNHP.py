@@ -6,62 +6,56 @@ from scipy.integrate import quad
 from torch.autograd import Variable
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
+import copy
 
 from simple_linear_networks import *
 
 class LSTMLayerStacked(nn.Module):
-    def __init__(self, cell, input_size, hidden_size, t):
+    def __init__(self, cell, input_size, hidden_size):
         super().__init__()
         self.stackedcell = LSTMStackedCells(cell, input_size, hidden_size)
         self.num_layers = 4
         self.hidden_size = hidden_size
         self.embed_layer = Embed_layer(input_size, hidden_size)
-        self.h_input_merge_LC = Hidden_sharing_layer(5*hidden_size, 4*hidden_size)
+        self.h_input_merge_LC = Hidden_sharing_layer(5*hidden_size, 4*hidden_size, 4*hidden_size)
         self.intensity_functions = []
-        self.t_seq = t
         
     def forward(self, X, t_seq):
-        
-        first_run = True
-        
-        h1, h2, h3, h4 = [Variable(torch.randn(self.hidden_size)) for i in range(4)]
-        c1_1, c2_1, c3_1, c4_1 = [Variable(torch.randn(self.hidden_size)) for i in range(4)]
-        c1_2, c2_2, c3_2, c4_2 = [Variable(torch.randn(self.hidden_size)) for i in range(4)]
+        self.intensity_functions = []
+        h1, h2, h3, h4 = [torch.randn(self.hidden_size) for i in range(4)]
+        c1_1, c2_1, c3_1, c4_1 = [torch.randn(self.hidden_size) for i in range(4)]
+        c1_2, c2_2, c3_2, c4_2 = [torch.randn(self.hidden_size) for i in range(4)]
         
         i=0
+        first_run = True
         
-        for x, tj in zip(X, self.t_seq):
-            embedded_input = self.embed_layer(x)
-            
-            if not first_run: #TODO bit messy way to initialise run & set cell states. Clean it up if time left
-#                 c1_1, c2_1, c3_1, c4_1 = self.fill_in_func(c1_func_list, tj)
-#                 h1, h2, h3, h4 = self.fill_in_func(h_func_list, tj)
-#                 c1_2, c2_2, c3_2, c4_2 = c2_list
+        for x, tj in zip(X, t_seq):
+            tj = t_seq[i]
+            x = X[i]
+
+            if not first_run:
+                c1_1, c2_1, c3_1, c4_1 = self.fill_in_func(c1_func_list, tj)
+                h1, h2, h3, h4 = self.fill_in_func(h_func_list, tj)
+                c1_2, c2_2, c3_2, c4_2 = c2_list
+
+            embedded_input = self.embed_layer(x)    
                 
-                h1, h2, h3, h4 = [Variable(torch.randn(self.hidden_size)) for i in range(4)] #remove
-                c1_1, c2_1, c3_1, c4_1 = [Variable(torch.randn(self.hidden_size)) for i in range(4)]
-                c1_2, c2_2, c3_2, c4_2 = [Variable(torch.randn(self.hidden_size)) for i in range(4)]
-                
-#             h1, h2, h3, h4 = self.process_hidden_states_and_input(embedded_input, h1, h2, h3, h4)
+            h1, h2, h3, h4 = self.process_hidden_states_and_input(embedded_input, h1, h2, h3, h4)
             
-            h1, h2, h3, h4 = [Variable(torch.randn(self.hidden_size)) for i in range(4)] #remove
+            states = [(h1, c1_1, c1_2), (h2, c2_1, c2_2), (h3, c3_1, c3_2), (h4, c4_1, c4_2)]
             
-            state = [(h1, c1_1, c1_2), (h2, c2_1, c2_2), (h3, c3_1, c3_2), (h4, c4_1, c4_2)]
-            
-            c2_list, c1_func_list, h_func_list, intensity_functions = self.stackedcell((state, tj))
+            c2_list, c1_func_list, h_func_list, intensity_functions = self.stackedcell((states, tj))
             
             self.intensity_functions.append(intensity_functions)
-            
+
             first_run = False
-            
-            print(f'LSTM LAYER RUN: {i}')
-            i += 1
+
             
         return self.intensity_functions, t_seq
             
     def process_hidden_states_and_input(self, embedded_input, h1, h2, h3, h4):
         h_merged_with_input =  self.h_input_merge_LC(torch.concat([embedded_input, h1, h2, h3, h4]))
-        
+
         h1, h2, h3, h4 = torch.split(h_merged_with_input, self.hidden_size)
     
         return h1, h2, h3, h4
@@ -80,9 +74,9 @@ class LSTMStackedCells(nn.Module):
         self.cell4 = cell(hidden_size, hidden_size)
         
     def forward(self, inputs):
-        state, tj = inputs
+        states, tj = inputs
         
-        state1, state2, state3, state4 = state
+        state1, state2, state3, state4 = states
         
         c1_2, c1_1_func, h1_func = self.cell1((state1, tj))
         c2_2, c2_1_func, h2_func = self.cell2((state2, tj))
@@ -101,15 +95,16 @@ class LSTMStackedCells(nn.Module):
         f2 = self.cell2.get_frozen_intensity_function()
         f3 = self.cell3.get_frozen_intensity_function()
         f4 = self.cell4.get_frozen_intensity_function()
+
         return [f1, f2, f3, f4]
 
+    
 
 
 class LSTMCell(nn.Module):
     def __init__(self, input_size, hidden_size = 16):
         super().__init__()
-        self.Tanh = nn.Tanh()
-        self.Softplus = nn.Softplus()
+        self.tanh = nn.Tanh()
         
         self.LC_i1 = Gate_network(input_size, hidden_size)
         self.LC_i2 = Gate_network(input_size, hidden_size)
@@ -138,7 +133,7 @@ class LSTMCell(nn.Module):
         f1 = self.LC_f1(hx)
         f2 = self.LC_f2(hx)
         o = self.LC_o(hx)
-        z = self.Tanh(self.LC_z(hx))
+        z = self.tanh(self.LC_z(hx))
 
         self.o = o
         self.cy1 = (f1 * cx1) + (i1 * z)
@@ -148,17 +143,18 @@ class LSTMCell(nn.Module):
         return self.cy2, self.get_c, self.get_h
         
     def get_frozen_intensity_function(self): #variables are put in data_class so they become constants.
-        intensity_dataclass = Intensity_func_and_constants(self.tj, self.cy1, self.cy2, self.decay_coef, self.o, self.LC_lambda)
+        intensity_dataclass = Intensity_func_and_constants(self.tj, self.cy1.clone(), self.cy2.clone(), self.decay_coef.clone(), self.o.clone(), copy.deepcopy(self.LC_lambda))
         return intensity_dataclass.get_intensity_function()
         
     def get_intensity(self, t):
+        # print(f'debug: self.o: {self.o}')
         h_t = self.get_h(t)
         intensity = self.LC_lambda(h_t)
         return intensity
         
     def get_h(self, t):
         c_t = self.get_c(t)
-        h_t = self.o * self.Tanh(c_t)
+        h_t = self.o * self.tanh(c_t)
         return h_t
 
     def get_c(self, t):
@@ -166,15 +162,15 @@ class LSTMCell(nn.Module):
         return c_t
     
 class Intensity_func_and_constants():
-    def __init__(self, tj, c1, c2, decay_coeff, o, LC_lambda):
+    def __init__(self, tj, c1, c2, decay_coef, o, LC_lambda):
         self.tj = tj
         self.cy1 = c1
         self.cy2 = c2
-        self.decay_coef = decay_coeff       
+        self.decay_coef = decay_coef   
         self.o = o
         self.LC_lambda = LC_lambda
         self.tanh = nn.Tanh()
-            
+
     def get_intensity_function(self):
         return self.get_intensity
             
